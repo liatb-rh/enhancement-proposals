@@ -6,7 +6,19 @@
 | Jira        | https://redhat.atlassian.net/browse/OSAC-1436 |
 | Date        | 2026-07-08 |
 
-> This PRD is an expansion of the [Unified Networking PRD](/enhancements/OSAC-1433-unified-networking/prd.md), scoped to the specific service type. The unified PRD defines the shared architectural requirements; this document defines the service-specific requirements and user stories.
+> This PRD is an expansion of the [Unified Networking PRD](/enhancements/OSAC-1433-unified-networking/prd.md), scoped to the specific service type. The unified PRD defines the shared architectural requirements and requires connected deployments only; air-gapped and disconnected networking deployments are not supported. This document defines the service-specific requirements and user stories.
+Networking resources support only Create, List/Get, and Delete, and the
+Cluster network attachment field is create-time-only; changes require delete
+and recreate.
+
+CaaS networking also inherits the [Unified Networking hub support
+boundary](/enhancements/OSAC-1433-unified-networking/prd.md#networking-hub-support-boundary):
+OSAC networking supports exactly one provider-owned hub per deployment.
+Multi-hub networking placement, cross-hub resource coordination, and
+cross-hub network connectivity are unsupported. This boundary applies only to
+the networking area and does not define hub behavior for other OSAC areas.
+Multiple hosting/workload clusters remain supported where a networking feature
+explicitly specifies them.
 
 ## 1. Problem Statement
 
@@ -62,7 +74,7 @@ Cluster provisioning has no networking configuration. Tenants cannot choose whic
 
 #### Network Configuration
 
-- **FR-1:** Cluster creation supports a single network attachment configuration specifying a subnet (required, immutable) and security groups (mutable). The attachment applies to the entire cluster — all node sets share the same subnet. The system determines which physical network interface to use for each node set based on its host type's interface configuration. [User]
+- **FR-1:** Cluster creation supports a single network attachment configuration specifying a subnet (required, immutable) and security groups (immutable after creation). The attachment applies to the entire cluster — all node sets share the same subnet. The system determines which physical network interface to use for each node set based on its host type's interface configuration. [User]
 
 #### Optional Network Configuration with Defaults
 
