@@ -18,6 +18,9 @@ approvers:
 - danmanor
 - rawagner
 - rccrdpccl
+# UI/UX
+- batzionb
+- ElayAharoni
 # Managers
 - AlonaKaplan
 - chenyosef
@@ -28,6 +31,7 @@ approvers:
 - ronniel1
 - ybettan
 - udis
+- ItzikEzra-rh
 reviewers:
 - adriengentil
 - akshaynadkarni
@@ -59,3 +63,4 @@ reviewers:
 - ygalblum
 - ybettan
 - udis
+- ItzikEzra-rh

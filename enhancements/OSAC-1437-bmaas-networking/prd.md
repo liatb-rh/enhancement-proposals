@@ -1,199 +1,250 @@
-# BMaaS Networking — Single Attachment and Auto External Access
+---
+title: bmaas-networking
+authors:
+  - dmanor@redhat.com
+creation-date: 2026-07-08
+last-updated: 2026-11-09
+tracking-link:
+  - https://redhat.atlassian.net/browse/OSAC-1437
+see-also:
+  - Unified Networking PRD: /enhancements/OSAC-1433-unified-networking/prd.md
+  - BMaaS Networking Design: /enhancements/OSAC-1437-bmaas-networking/design.md
+replaces:
+  - N/A
+superseded-by:
+  - N/A
+---
+
+# BMaaS Networking — Single Attachment and Automatic External Access
 
 | Field       | Value   |
 |-------------|---------|
 | Author(s)   | Dan Manor (dmanor@redhat.com) |
 | Jira        | https://redhat.atlassian.net/browse/OSAC-1437 |
-| Date        | 2026-07-08 |
+| Date        | 2026-10-22 |
 
-> This PRD is an expansion of the [Unified Networking PRD](/enhancements/OSAC-1433-unified-networking/prd.md), scoped to the specific service type. The unified PRD defines the shared architectural requirements and requires connected deployments only; air-gapped and disconnected networking deployments are not supported. This document defines the service-specific requirements and user stories.
-Networking resources support only Create, List/Get, and Delete, and the
-bare-metal network attachment fields are create-time-only; changes require
-delete and recreate.
+This PRD extends the [Unified Networking PRD](/enhancements/OSAC-1433-unified-networking/prd.md) for bare-metal servers and inherits its [deployment](/enhancements/OSAC-1433-unified-networking/design.md#deployment-support-boundary) and [hub](/enhancements/OSAC-1433-unified-networking/design.md#networking-hub-support-boundary) support boundaries and [create/read/delete contract, with its SecurityGroup rule update](/enhancements/OSAC-1433-unified-networking/prd.md#fr-8-createreaddelete-networking-contract-r8). A server's network selection is fixed at creation; to change it, replace the server.
 
-BMaaS networking also inherits the [Unified Networking hub support
-boundary](/enhancements/OSAC-1433-unified-networking/prd.md#networking-hub-support-boundary):
-OSAC networking supports exactly one provider-owned hub per deployment.
-Multi-hub networking placement, cross-hub resource coordination, and
-cross-hub network connectivity are unsupported. This boundary applies only to
-the networking area and does not define hub behavior for other OSAC areas.
-Multiple hosting/workload clusters remain supported where a networking feature
-explicitly specifies them.
+Provider-dependent connectivity, allocation, and cleanup in this document apply with provider networking enabled; FR-13 covers provider networking disabled. Default SecurityGroup selection, immutability, validation, and dependency rules apply in both cases.
+
+## Contents
+
+- [1. Problem Statement](#1-problem-statement)
+- [2. Goals and Non-Goals](#2-goals-and-non-goals)
+  - [2.1 Goals](#21-goals)
+  - [2.2 Non-Goals](#22-non-goals)
+- [3. User Stories](#3-user-stories)
+  - [Tenant User Stories](#tenant-user-stories)
+  - [Tenant Admin Stories](#tenant-admin-stories)
+  - [Cloud Infrastructure Admin Stories](#cloud-infrastructure-admin-stories)
+  - [Cloud Provider Admin Stories](#cloud-provider-admin-stories)
+- [4. Requirements](#4-requirements)
+  - [4.1 Functional Requirements](#41-functional-requirements)
+    - [Network Attachment](#network-attachment)
+    - [Physical Interface Discovery](#physical-interface-discovery)
+    - [Interface Validation](#interface-validation)
+    - [Primary Gateway Designation](#primary-gateway-designation)
+    - [Optional Network Attachment with Defaults](#optional-network-attachment-with-defaults)
+    - [Automatic External Access](#automatic-external-access)
+    - [Network Connectivity Configuration](#network-connectivity-configuration)
+    - [IP Address Discovery](#ip-address-discovery)
+    - [External IP Attachment for Bare-Metal](#external-ip-attachment-for-bare-metal)
+    - [Provider Networking Selection](#provider-networking-selection)
+    - [Automatic Resource Cleanup](#automatic-resource-cleanup)
+    - [Network Attachment Deletion](#network-attachment-deletion)
+    - [Provider Networking Disabled](#provider-networking-disabled)
+    - [Stateful Attachment Policy](#stateful-attachment-policy)
+  - [4.2 Non-Functional Requirements](#42-non-functional-requirements)
+- [5. Acceptance Criteria](#5-acceptance-criteria)
+- [6. Assumptions](#6-assumptions)
+- [7. Dependencies](#7-dependencies)
+- [8. Risks](#8-risks)
+  - [8.1 Shared manager platform support blocked or delayed](#81-shared-manager-platform-support-blocked-or-delayed)
+  - [8.2 Fabric Manager bare-metal support blocked](#82-fabric-manager-bare-metal-support-blocked)
+  - [8.3 IP address feedback mechanism fails](#83-ip-address-feedback-mechanism-fails)
+  - [8.4 ExternalIPPool exhaustion](#84-externalippool-exhaustion)
 
 ## 1. Problem Statement
 
-Provisioning bare-metal servers requires manual switch configuration outside the OSAC API. Tenants cannot attach bare-metal servers to subnets, apply security groups, or configure external access through the API. The system does not expose which physical network interfaces are available on a bare-metal server, forcing tenants to discover interface names through out-of-band documentation. Creating a reachable bare-metal server with both inbound and outbound connectivity requires sequential API calls to create networking resources and manual coordination with infrastructure administrators for switch port configuration.
+Provisioning bare-metal servers requires manual switch configuration outside the OSAC API. Tenants cannot attach servers to Subnets, apply SecurityGroups, or configure external access through the API, and must learn physical interface names from out-of-band documentation. A reachable server with inbound and outbound connectivity takes sequential API calls plus manual switch-port coordination with infrastructure administrators.
 
 ## 2. Goals and Non-Goals
 
 ### 2.1 Goals
 
-- A tenant can provision a bare-metal server with one explicit network attachment, optionally specifying which physical interface connects to its subnet
-- A tenant can create a bare-metal server with `--external-ip-attachment` and have the system allocate an external IP for inbound access automatically
-- Network attachments are optional — when omitted, the system attaches the server to the tenant's default subnet and security group
-- BareMetalInstanceTypes expose available physical network ports through the API (name, role, type, speed) for bare-metal servers
-- Bare-metal provisioning uses the provisioning network for inventory and OS provisioning, then moves the selected fabric port to the tenant network and reboots the host so it receives its tenant-network IP
-- External IP attachments support bare-metal servers as a target type
-- The system uses a distinct configuration parameter for network automation backend selection, separate from the networking resource hierarchy
+- A tenant can provision a bare-metal server with one explicit network attachment, optionally choosing the physical interface that connects to its Subnet
+- A tenant can create a server with `--external-ip-attachment` and get an ExternalIP for inbound access automatically
+- Network attachments are optional; when omitted, the server uses the tenant's default Subnet and SecurityGroup
+- Tenants and administrators can discover each server type's physical interfaces and which can carry tenant traffic
+- Servers get tenant connectivity on the selected interface after host provisioning
+- ExternalIPAttachments can target bare-metal servers
+- Cloud Infrastructure Admins select the deployment's networking implementation without exposing provider selection to tenants
 
-### 2.2 Success Metrics
+### 2.2 Non-Goals
 
-| Metric | Target | Baseline |
-|--------|--------|----------|
-| BM provisioning time with networking | <5 min | N/A (no baseline) |
-| Network connectivity configuration success rate | >95% | N/A |
-
-### 2.3 Non-Goals
-
-- Cluster or VM networking (this PRD covers bare-metal servers only; clusters and VMs are addressed in separate enhancements)
-- Network provisioning infrastructure implementation (deferred to Unified Networking EP implementation)
-- Fabric manager implementation (network fabric automation via templates)
-- Multi-interface failover or bonding (out of scope for initial implementation)
+- Cluster or VM networking (separate enhancements)
+- Provider-specific networking implementation; this PRD defines bare-metal outcomes on the shared networking and manager contracts
+- Multi-interface failover or bonding
+- Enabling BMaaS on a deployment that already has networking resources is unsupported. The Unified Networking fulfillment service rejects this transition using the startup guard in [Unified — Subnet address plan](/enhancements/OSAC-1433-unified-networking/design.md#subnet-address-plan). This proposal does not migrate or backfill existing networking resources.
 
 ## 3. User Stories
 
 ### Tenant User Stories
 
-- As a Tenant User, I want to create a bare-metal server with one explicit network attachment so that I can connect a selected physical interface to a subnet
-- As a Tenant User, I want to see which physical network ports are available on a BareMetalInstanceType so that I can select the appropriate interface when creating the attachment
-- As a Tenant User, I want to create a bare-metal server with `--external-ip-attachment` and have it externally reachable in a single API call, without manually creating external IP and attachment resources
-- As a Tenant User, I want the sole network attachment to provide the default gateway without needing a second attachment
-- As a Tenant User, I want auto-provisioned external IPs to be automatically cleaned up when I delete the server, so that I do not accumulate orphaned resources
-- As a Tenant User, I want network interface validation when creating the attachment so that I get a clear error if I specify a port that does not exist or is not tenant-attachable
+- As a Tenant User, I want to create a bare-metal server with one explicit network attachment so that I can connect a selected physical interface to a Subnet
+- As a Tenant User, I want to see the physical network ports of a BareMetalInstanceType so that I can select the right interface for the attachment
+- As a Tenant User, I want to create a server with `--external-ip-attachment` and have it externally reachable in one API call, without creating ExternalIP and ExternalIPAttachment resources myself
+- As a Tenant User, I want the sole network attachment to provide the default gateway without a second attachment
+- As a Tenant User, I want automatic ExternalIPs cleaned up when I delete the server, so that I do not accumulate orphaned resources
+- As a Tenant User, I want a clear error if I select a port that does not exist or is not tenant-attachable
 
 ### Tenant Admin Stories
 
-- As a Tenant Admin, I want visibility into which physical interfaces are connected to which subnets for a bare-metal server so that I can troubleshoot network connectivity issues
+- As a Tenant Admin, I want to see which physical interfaces of a server connect to which Subnets so that I can troubleshoot connectivity
 
 ### Cloud Infrastructure Admin Stories
 
-- As a Cloud Infrastructure Admin, I want to define available physical ports for each BareMetalInstanceType (name, role, type, speed) so that tenants can discover and select the correct interface
+- As a Cloud Infrastructure Admin, I want to define which physical interfaces of each server type are available for tenant networking, so tenants can choose a suitable connection
+- As a Cloud Infrastructure Admin, I want bare-metal networking to use the deployment's selected networking implementation, so that tenants do not choose a provider backend
 
 ### Cloud Provider Admin Stories
 
-- As a Cloud Provider Admin, I want to see which IP addresses were allocated to each network interface on a bare-metal server so that I can troubleshoot connectivity and external access configuration
+- As a Cloud Provider Admin, I want to see the IP addresses allocated to each network interface of a server so that I can troubleshoot connectivity and external access
 
 ## 4. Requirements
 
 ### 4.1 Functional Requirements
 
-#### Network Attachment Specification
+#### Network Attachment
 
-- **FR-1:** Tenants can specify zero or one entry in the repeated `network_attachments` field when creating a bare-metal server. The attachment may omit its subnet, security-group list, or physical interface; missing fields are defaulted without replacing supplied values. The complete resolved list and every entry field are immutable after creation. The repeated field is retained for API compatibility; more than one entry is rejected. [User]
+- **FR-1:** A tenant can create a bare-metal server with at most one network attachment ([Unified PRD FR-7](/enhancements/OSAC-1433-unified-networking/prd.md#fr-7-single-network-attachment-per-workload-r7)); requests for more are rejected. The tenant can leave network choices to the platform or give a partial selection (FR-5); the resolved selection is fixed after creation.
 
-#### BareMetalInstanceType Network Port Discovery
+#### Physical Interface Discovery
 
-- **FR-2:** The BareMetalInstanceType API exposes available physical network ports. Each port includes a name (e.g., "data-0"), role (e.g., "fabric", "management", "storage"), type, and speed. Ports are ordered; when multiple ports share the same role, the first in the list is the default for that role. [User]
+- **FR-2:** Tenants and administrators can discover each bare-metal instance type's network interfaces, including what distinguishes tenant-facing from system interfaces. When several suitable tenant-facing interfaces exist, the platform picks a consistent default.
 
 #### Interface Validation
 
-- **FR-3:** The system validates that the physical interface specified in the sole network attachment exists in the BareMetalInstanceType's `network_ports` list. A request containing more than one attachment is rejected. [User]
+- **FR-3:** OSAC rejects a request that selects an unavailable or system-only interface, or that attaches a server to multiple tenant networks, with an error identifying the invalid choice.
 
 #### Primary Gateway Designation
 
-- **FR-4:** When one network attachment exists, it is the primary attachment and provides the default gateway. The `primary` designation is optional; omission or `primary: true` has the same meaning, while `primary: false` is rejected. [User]
+- **FR-4:** The server's sole network attachment is its primary route and gateway; there is no separate primary-network choice.
 
-#### Optional Network Attachments with Defaults
+#### Optional Network Attachment with Defaults
 
-- **FR-5:** Network attachments are optional when creating a bare-metal server. When omitted or empty, the system attaches the server to the tenant's default subnet and default security group, using the first `fabric` port from the BareMetalInstanceType (see Default Networking PRD). When a single attachment is supplied, only missing subnet, security-group, or interface fields are defaulted; a missing or explicitly empty security-group list is treated as missing. A default security group is used only when the resolved subnet belongs to the tenant's default VirtualNetwork; otherwise the caller must provide SecurityGroups from the resolved subnet's VirtualNetwork. Supplied values are preserved. If the BareMetalInstanceType has no valid fabric port, creating a server without an explicit interface fails with a clear error. The resolved attachment is stored with the server so the server is self-describing after creation. [User]
+- **FR-5:** Network selection is optional. OSAC resolves an omitted or partial Subnet and SecurityGroup selection as [Default Networking PRD FR-6](/enhancements/OSAC-1433-default-networking/prd.md#optional-network-attachment-with-defaults) defines and, when no interface is given, selects a suitable tenant-facing interface for the server's instance type. The resolved network stays visible with the server after creation.
 
-#### Auto External IP
+#### Automatic External Access
 
-- **FR-6:** Bare-metal servers support `--external-ip-attachment`. When enabled, the system auto-selects the external IP pool with the most available capacity, allocates an external IP, and creates an external IP attachment binding it to the server's primary attachment subnet IP. The external IP and attachment are labeled as auto-provisioned. [User]
+- **FR-6:** A tenant can request `--external-ip-attachment` when creating a bare-metal server; the server is its only endpoint. Capacity check, readiness, visibility, and behavior with provider networking disabled follow [Default Networking PRD FR-8 to FR-11](/enhancements/OSAC-1433-default-networking/prd.md#automatic-external-access): inbound access starts only after the provider assigns a real address and the server's tenant endpoint is ready.
 
 #### Network Connectivity Configuration
 
-- **FR-7:** The host remains on the provisioning network through OS provisioning. After provisioning completes, the system moves the selected fabric port to the tenant network, reboots the host, and allows the host to obtain an IP through tenant-network DHCP. [User]
+- **FR-7:** With provider networking enabled, the server gets tenant connectivity on the selected interface after host provisioning. OSAC reports it only after the attachment is ready and the selected interface has a known tenant address; policy is active before traffic. A provisioning-network address is never presented as the tenant address.
 
-#### IP Address Visibility
+#### IP Address Discovery
 
-- **FR-8:** The allocated IP address for the network attachment is visible in the bare-metal server status after network connectivity is configured. [User]
+- **FR-8:** The tenant IPv4 address of the selected interface is visible with the server after discovery. If the platform cannot identify that interface or its address, it reports the issue clearly and never substitutes an address from another interface or from host provisioning.
 
 #### External IP Attachment for Bare-Metal
 
-- **FR-9:** External IP attachments support bare-metal servers as an attachment target type. When an external IP is attached to a bare-metal server, inbound traffic to the external IP is routed to the server's primary attachment IP. [User]
+- **FR-9:** An ExternalIPAttachment can provide inbound access to a bare-metal server; traffic to its ExternalIP reaches the server's primary tenant address.
 
-#### Network Automation Backend Configuration
+#### Provider Networking Selection
 
-- **FR-10:** The system manages network automation backend selection without tenant involvement. The provider configures which network automation backend handles bare-metal networking; this configuration is separate from the networking resource hierarchy and is not visible to tenants. [User]
+- **FR-10:** Bare-metal networking uses the networking implementation the Cloud Infrastructure Admin selects; tenants neither select nor need to understand it ([Unified PRD FR-6](/enhancements/OSAC-1433-unified-networking/prd.md#fr-6-modular-networking-backends-with-transparent-selection-r6)).
 
-#### Auto-Cleanup on Deletion
+#### Automatic Resource Cleanup
 
-- **FR-11:** When a bare-metal server is deleted, if external IP and external IP attachment were auto-provisioned (labeled as auto-provisioned), the system deletes the external IP attachment first, then the external IP. Manually created resources are NOT cleaned up. Default networking resources (virtual network, subnet, security group, NATGateway) are NOT cleaned up. [User]
+- **FR-11:** Deleting a server removes its automatically created inbound routes and external addresses. If provider cleanup fails, deletion stays pending with an actionable diagnostic and the resources stay owned for retry. The tenant removes manually created routes first; shared tenant defaults remain.
 
 #### Network Attachment Deletion
 
-- **FR-12:** During bare-metal server deletion, the system deconfigures network connectivity for the selected interface and releases the allocated IP address. [User]
+- **FR-12:** Server deletion returns a host to the available inventory only after required tenant-network cleanup succeeds; a cleanup failure keeps deletion pending, visible, and unavailable for reuse. The fulfillment service rejects a delete with `FAILED_PRECONDITION` while a FabricDomain `spec.servers` entry names the BMI's assigned host; the tenant must delete the FabricDomain before deleting that server.
+
+#### Provider Networking Disabled
+
+- **FR-13:** A Cloud Provider Admin can install a deployment with provider networking disabled ([Unified PRD FR-10](/enhancements/OSAC-1433-unified-networking/prd.md#fr-10-provider-networking-control-at-installation)); bare-metal host provisioning, management, and deprovisioning stay available. With provider networking disabled, OSAC does not move tenant interfaces, discover tenant addresses, or promise tenant routing or ExternalIP access; the service keeps using the platform's provisioning network when its other requirements are met. Networking API status makes clear that provider work is not done, and deletion stays available (FR-12).
+
+#### Stateful Attachment Policy
+
+- **FR-14:** The selected SecurityGroups describe the server's requested policy ([Unified PRD FR-1](/enhancements/OSAC-1433-unified-networking/prd.md#fr-1-network-isolation-and-connectivity-r1)). A Fabric Manager that implements physical enforcement applies that policy before tenant traffic and makes policy failures visible. A manager may document a physical SecurityGroup no-op; in that supported provider configuration the server can still reach Ready, its port is unfiltered, and OSAC does not claim that the requested policy was enforced. This is a provider limitation, not a temporary waiver or a requirement for future enforcement.
 
 ### 4.2 Non-Functional Requirements
 
-- **NFR-1:** Auto external IP allocation completes synchronously within the create API call (no async allocation delay). If no pool has available capacity, the create API call returns an error. [User]
+Beyond the [Unified PRD](/enhancements/OSAC-1433-unified-networking/prd.md): FR-6 covers the capacity check and its clear error, and:
 
-- **NFR-2:** Network attachment provisioning (connectivity configuration) completes within 2 minutes for the selected interface. [User]
+- **NFR-1:** Of the servers created with provider networking enabled whose OS provisioning completed, more than 95% reach `Ready` with a tenant address (measured from the BareMetalInstance network conditions).
+
+- **NFR-2:** Target: with a conformant Fabric Manager, tenant connectivity for the selected interface (address discovery included) completes within 2 minutes after the handoff power cycle completes. This is a target, not a guarantee. When no tenant address is found 10 minutes after the server powers on to its tenant network, OSAC shows a warning on the server and keeps trying.
 
 ## 5. Acceptance Criteria
 
-- [ ] A Tenant User can create a bare-metal server with one explicit network attachment and an optional physical interface from the BareMetalInstanceType
-- [ ] A Tenant User can create a bare-metal server with `--external-ip-attachment` and no explicit network attachments — the server is created on the default subnet with an auto-provisioned external IP for inbound access
-- [ ] A bare-metal server with one attachment is provisioned with that attachment providing the default gateway
-- [ ] Auto-created external IP and external IP attachment are labeled as auto-provisioned and visible in list views
-- [ ] Deleting a bare-metal server with auto-provisioned external IP causes the auto-created external IP and external IP attachment to be cleaned up automatically
-- [ ] BareMetalInstanceType API returns structured physical network ports (name, role, type, speed)
-- [ ] Creating a bare-metal server with an invalid interface (not in the BareMetalInstanceType's `network_ports` list) returns an error
-- [ ] Creating a bare-metal server with `primary: false` returns an error
-- [ ] Creating a bare-metal server with more than one network attachment returns a maximum-one error
-- [ ] Bare-metal server primary attachment IP is visible in status after network connectivity is configured
-- [ ] External IP attachment with bare-metal server target routes inbound traffic to the server's primary attachment IP
+- [ ] A Tenant User can create a bare-metal server with one network attachment and, when needed, select an available tenant-facing interface
+- [ ] A Tenant User can create a server with `--external-ip-attachment` and no network selection; OSAC uses the tenant defaults and provides inbound access once the server and address are ready
+- [ ] The server's sole network attachment provides its primary route, and its tenant address is visible after connectivity is established
+- [ ] Available physical interfaces are discoverable; unavailable or system-only interfaces are rejected with a clear error
+- [ ] With provider networking enabled, deletion keeps the host unavailable for reuse until required network and ExternalIP cleanup succeeds; a cleanup failure leaves deletion pending with a visible diagnostic
+- [ ] Automatic ExternalIPs and ExternalIPAttachments are visible and are removed when their server is deleted
+- [ ] An ExternalIPAttachment can target a bare-metal server and sends inbound traffic to its primary tenant address
+- [ ] When the Fabric Manager implements physical SecurityGroup enforcement, policy failures leave the server non-ready; when it documents a physical no-op, the server can become Ready with worker-port traffic understood to be unfiltered and no claim of policy enforcement
+- [ ] Default SecurityGroup resolution, invalid network/interface rejection, tenant boundaries, and network immutability remain active with provider networking enabled or disabled
+- [ ] With provider networking disabled, host provisioning works when platform prerequisites are met; server readiness does not imply tenant routing, external-address allocation, or provider cleanup
+- [ ] With provider networking disabled, deletion and host deprovisioning stay available
+- [ ] An automatic external-access request accepted while provider networking is disabled exposes no fabricated address or route and never gives that server inbound access
+- [ ] Update rules meet [Unified PRD FR-8](/enhancements/OSAC-1433-unified-networking/prd.md#fr-8-createreaddelete-networking-contract-r8) for bare-metal servers
 
 ## 6. Assumptions
 
-- The tenant has default networking resources (virtual network, subnet, security group) pre-created at onboarding (see Default Networking PRD). If defaults are not configured, creating a server without explicit network attachments fails with a clear error.
-- The NetworkClass has a fabric manager configured (the system can resolve which network automation to use).
-- The BareMetalInstanceType for the bare-metal template has a populated `network_ports` list with at least one `fabric` port. If no valid fabric port exists, creating a server without an explicit interface fails with a clear error.
-- Out-of-band provisioning interfaces (PXE boot, BMC) are reserved for system use and are NOT tenant-attachable (should not appear in network attachments).
+- The tenant's default networking resources (VirtualNetwork, Subnet, SecurityGroup) are pre-created at onboarding (see Default Networking PRD). Without them, creating a server without network attachments fails with a clear error.
+- The NetworkClass selects a registered Fabric Manager.
+- Every Subnet has the address range the service needs, because the provider's address plan covers every enabled service ([Unified](/enhancements/OSAC-1433-unified-networking/design.md#subnet-address-plan)).
+- The selected instance type exposes at least one suitable tenant-facing interface; otherwise creating a server fails with a clear error.
+- Only ports whose port role is `fabric` can be selected for tenant networking; `management`, `storage`, and `lifecycle` (BMC) ports cannot.
 
 ## 7. Dependencies
 
-- **Unified Networking EP** — this PRD builds on the unified networking resource model (VirtualNetwork, Subnet, SecurityGroup, ExternalIP, ExternalIPAttachment, NATGateway) defined in the [Unified Networking EP](/enhancements/OSAC-1433-unified-networking)
-- **Default Networking PRD** — default Subnet and SecurityGroup selection behavior defined in [Default Networking PRD](/enhancements/OSAC-1433-default-networking)
-- **Networking manager dispatch** — the system must be able to route networking operations to the correct fabric manager (in progress)
-- **NAT gateway support** — outbound NAT must be available as a networking resource
-- **External access for BM targets** — the external IP attachment system must support bare-metal servers as targets
-- **CLI support** — the CLI must support specifying network attachments when creating bare-metal servers
-- **Fabric manager BM networking role** — at least one fabric manager (e.g., Netris) must implement the switch port configuration role for bare-metal servers
+- **Unified Networking design** — the unified networking resource model ([Unified Networking design](/enhancements/OSAC-1433-unified-networking/design.md))
+- **Default Networking PRD** — default Subnet and SecurityGroup selection ([Default Networking PRD](/enhancements/OSAC-1433-default-networking/prd.md))
+- **Network Manager Integration Contract** — manager selection, shared task execution, and the requirements a provider's Fabric Manager must meet; this PRD defines bare-metal behavior on top of it ([PRD](/enhancements/OSAC-1433-network-manager-integration-contract-networking/prd.md), [design](/enhancements/OSAC-1433-network-manager-integration-contract-networking/design.md))
+- **NATGateway stack (OSAC-1443)** — outbound access for servers through the VirtualNetwork's NATGateway
+- **Conformant Fabric Manager** — has a conformant report from the shared conformance suite whose `baremetal` profile passed; see Risk 8.2
 
 ## 8. Risks
 
-### 8.1 Network automation implementation blocked or delayed
+### 8.1 Shared manager platform support blocked or delayed
 
 - **Owner:** Platform team
-- **Mitigation:** Network automation core tasks (OSAC-1457, OSAC-1458, OSAC-1460) are in progress. If network automation is not ready, bare-metal networking cannot function. Prioritize completing network automation core before bare-metal networking implementation.
+- **Mitigation:** Bare-metal provider networking depends on the Network Manager Integration Contract's registration APIs, validation, generic task execution, and result handling. Gate the service implementation on that shared support.
 
-### 8.2 Fabric manager bare-metal support blocked
+### 8.2 Fabric Manager bare-metal support blocked
 
 - **Owner:** Network automation team
-- **Mitigation:** Fabric manager bare-metal networking role (OSAC-2081) is new. If fabric manager does not implement bare-metal network attachment creation and deletion, switch port configuration will fail. Coordinate with fabric manager team to prioritize bare-metal support.
+- **Mitigation:** A conformant report whose `baremetal` profile passed is a GA criterion; the QE lab report is Tech Preview evidence.
 
-### 8.3 IP address feedback mechanism fails
+### 8.3 Provisioning network isolation is insufficient
+
+- **Owner:** Cloud Infrastructure Admin
+- **Mitigation:** The provider isolates hosts, blocks rogue DHCP, restricts management-service access, and allows only required provisioning traffic. Tenant-controlled `user_data` runs on this network during first boot, before the port moves, and while provider networking is disabled. Operator installation documentation warns of this exposure and states the provider isolation prerequisites. OSAC does not configure or verify physical isolation at startup; the QE report is evidence only for the reference lab.
+
+### 8.4 IP address feedback mechanism fails
 
 - **Owner:** Platform team
-- **Mitigation:** If the fabric manager does not write the allocated IP to server status, external IP attachment cannot configure inbound NAT. Validate IP feedback mechanism during integration testing. Fallback: manual IP lookup from fabric manager API (deferred to future enhancement).
+- **Mitigation:** A missing or ambiguous tenant address on the selected interface keeps connectivity unready and prevents inbound access. A final address-discovery failure marks the server failed, and the tenant replaces it. The service never substitutes another interface or a provisioning-network address.
 
-### 8.4 External IP pool exhaustion
+### 8.5 ExternalIPPool exhaustion
 
-- **Owner:** Cloud Provider Admin
-- **Mitigation:** Pool capacity visible in status; clear error directs tenant to explicit allocation from another pool
+- **Owner:** Cloud Infrastructure Admin
+- **Mitigation:** Pool capacity visible in status; the error tells the tenant to contact the admin.
 
-## 9. Open Questions
+---
 
-### ~~9.1 Should the out-of-band provisioning interface be explicitly excluded from validation or just documented?~~ — Resolved
+## Provenance
 
-Resolved: Explicitly excluded in validation. Lifecycle and BMC interfaces are not tenant-attachable and are rejected during server validation. This is not just documented — it is enforced.
+Authored: respond @ prd 0.11.5 - 87d14ea, workspace main @ 74c7c4fb3
+Phases: respond, respond, respond, respond, respond
 
-### ~~9.2 Should capacity exhaustion return an API error or create a failed resource?~~ — Resolved
+> This document's phase history does not include an initial /draft — structure was not verified against the template from origin.
 
-Resolved: Return error, no resource persisted.
-
-### ~~9.3 What is the interface selection logic when network attachments are omitted and the BareMetalInstanceType has multiple fabric ports?~~ — Resolved
-
-Resolved: First in the list. Ports are ordered in the BareMetalInstanceType; when multiple ports share the same role, the first one is the default. This is already defined in FR-2.
+<!-- ai-workflow-provenance:{"schema_version":1,"provenance_kind":"session","workflow":"prd","workflow_version":"0.11.5","ai_workflows":"87d14ea","source_repo":"74c7c4fb3","source_repo_branch":"main","commits_behind_main":0,"commits_ahead_main":0,"main_ref":"main","phases":["respond","respond","respond","respond","respond"],"authoring_modes":["skill"],"context_changed":false,"origin_untracked":true} -->
